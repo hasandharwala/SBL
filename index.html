@@ -1983,7 +1983,7 @@
               <div class="formgrid">
                 <div class="field">
                   <label>Invoice Number *</label>
-                  <input id="inv-number" value="${esc(v.number)}" required ${existingInv && existingInv.status === 'Issued' ? 'readonly' : ''}>
+                  <input id="inv-number" value="${esc(v.number)}" required autocomplete="off">
                 </div>
                 <div class="field">
                   <label>Invoice Date *</label>
@@ -3467,6 +3467,12 @@
         const [r, b] = await Promise.all([get('Inter_400Regular.ttf'), get('Inter_700Bold.ttf')]);
         _pdfFontCache = { fontRegularB64: toB64(r), fontBoldB64: toB64(b) };
         try { _pdfFontCache.fontSemiB64 = toB64(await get('Inter_600SemiBold.ttf')); } catch (e) { /* optional weight */ }
+        // Italic face for the CGST / SGST / Cartage & Forwarding / Round Off labels (same as the print layout)
+        try {
+          const ib = await fetch('https://cdn.jsdelivr.net/npm/@expo-google-fonts/inter@0.4.2/400Regular_Italic/Inter_400Regular_Italic.ttf')
+            .then(x => { if (!x.ok) throw new Error('font'); return x.arrayBuffer(); });
+          _pdfFontCache.fontItalicB64 = toB64(ib);
+        } catch (e) { /* falls back to a slanted standard font */ }
       } catch (err) {
         console.warn('Invoice font unavailable; using the built-in PDF font.', err);
         return {};
@@ -3517,6 +3523,11 @@
           } else {
             FACE.s = 'InterBold';
           }
+          if (H.fontItalicB64) {
+            doc.addFileToVFS('Inter-Italic.ttf', H.fontItalicB64);
+            doc.addFont('Inter-Italic.ttf', 'InterItalic', 'normal', 400, 'Identity-H');
+            FACE.i = 'InterItalic';
+          }
           FONT = 'Inter';
           RS = '₹';
         } catch (e) { FONT = 'helvetica'; RS = 'Rs. '; }
@@ -3527,11 +3538,11 @@
       doc.setDrawColor(0);
       doc.setTextColor(0);
 
-      // weight: 'r' regular, 's' semibold (600), 'b' bold (700); true/false still accepted
+      // weight: 'r' regular, 's' semibold (600), 'b' bold (700), 'i' italic; true/false still accepted
       const font = (w, size) => {
         const k = w === true ? 'b' : (w === false || w === undefined) ? 'r' : w;
         if (FONT === 'Inter') doc.setFont(FACE[k] || 'Inter', 'normal');
-        else doc.setFont('helvetica', (k === 'b' || k === 's') ? 'bold' : 'normal');
+        else doc.setFont('helvetica', k === 'i' ? 'italic' : (k === 'b' || k === 's') ? 'bold' : 'normal');
         doc.setFontSize(size);
       };
       const text = (str, x, y, o = {}) => doc.text(String(str ?? ''), x, y, o);
@@ -3748,8 +3759,9 @@
           text(moneyRaw(it.taxable), colX[8] - 1.5, ty, { align: 'right' });
         } else {
           const ty = base(y, TAX_ROW_H, 9);
-          font('r', 9);
+          font('i', 9);
           text(r.label, colX[2] - 3, ty, { align: 'right' });
+          font('r', 9);
           if (r.rate) text(r.rate, colX[5] + colW[5] / 2, ty, { align: 'center' });
           text(r.amt, colX[8] - 1.5, ty, { align: 'right' });
         }
@@ -3774,7 +3786,7 @@
         text('Amount Chargeable (in words)', X0 + 1.2, base(y + 0.4, 3.2, 7.5));
         font('b', 7.9);
         text(numberWordsINR(inv.grandTotal), X0 + 1.2, base(y + 3.6, 3.3, 7.9));
-        font('r', 7.9);
+        font('i', 7.9);
         text('E. & O.E', X1 - 1.5, base(y + 0.4, 3.2, 7.9), { align: 'right' });
         y += WORDS_H;
         ln(X0, y, X1, y);
@@ -4611,6 +4623,14 @@
 
           if (existing) {
             db.invoices = db.invoices.map(i => i.id === existing.id ? invData : i);
+            // If the number was changed to a higher one, keep the next auto-number ahead of it (never lowers it)
+            if (existing.number !== invData.number) {
+              const editedSeq = parseInt(String(invData.number).split('/').at(-1), 10);
+              if (!isNaN(editedSeq) && editedSeq + 1 > db.seq) {
+                db.seq = editedSeq + 1;
+                db.settings.nextNumber = db.seq;
+              }
+            }
           } else {
             db.invoices.unshift(invData);
             // Increment invoice sequence counter
